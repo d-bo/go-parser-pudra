@@ -1,0 +1,7 @@
+*.o
+img/*
+!img/README
+src/*
+!src/goldapple
+pkg/
+bin/
