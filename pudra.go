@@ -5,6 +5,7 @@ import (
     "io"
     "fmt"
     "time"
+    "sync"
     "bytes"
     //"strconv"
     "strings"
@@ -12,9 +13,9 @@ import (
     //"encoding/json"
     //"io/ioutil"
     "gopkg.in/mgo.v2"
-    //"gopkg.in/mgo.v2/bson"
+    "gopkg.in/mgo.v2/bson"
     "golang.org/x/net/html"
-    "github.com/go-redis/redis"
+    //"github.com/go-redis/redis"
     //"github.com/json-iterator/go"
     "github.com/blackjack/syslog"
     "github.com/parnurzeal/gorequest"
@@ -61,59 +62,16 @@ func extractContext(s string) string {
     }
 }
 
-// Extract url matching "/pokupki
-func ExtractLinks(glob_session *mgo.Session, url string, redis_cli *redis.Client, keyword string) {
-
-    var f func(*html.Node, *mgo.Session, *redis.Client)
-
-    f = func(node *html.Node, session *mgo.Session, redis_cli *redis.Client) {
-        if node.Type == html.ElementNode && node.Data == "a" {
-            for _, a := range node.Attr {
-                if a.Key == "href" {
-                    if strings.Contains(a.Val, "pokupki/"+keyword) && strings.Contains(a.Val, "html") {
-                        fmt.Println("#", "pokupki/"+keyword, a.Val)
-                        err := redis_cli.Publish("productPageLinkChannel", a.Val).Err()
-                        if err != nil {
-                            panic(err)
-                        }
-                    }
-                }
-            }
-        }
-
-        // iterate inner nodes recursive
-        for c := node.FirstChild; c != nil; c = c.NextSibling {
-            f(c, session, redis_cli)
-        }
-    }
-
-    request := gorequest.New()
-    resp, body, errs := request.Get(url).
-        Retry(3, 5 * time.Second, http.StatusBadRequest, http.StatusInternalServerError).
-        End()
-    _ = resp
-    if errs != nil {
-        syslog.Critf("auchan request.Get(BrandUrl) error: %s", errs)
-    }
-
-    doc, err := html.Parse(strings.NewReader(string(body)))
-
-    if err != nil {
-        syslog.Critf("auchan html.Parse error: %s", errs)
-    }
-
-    f(doc, glob_session, redis_cli)
-}
-
 // Extract breadcrumbs
-func ExtractBrand(glob_session *mgo.Session, url string, redis_cli *redis.Client) {
+func ExtractBrand(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan int) {
 
-    var f func(*html.Node, *mgo.Session, *redis.Client)
+    var f func(*html.Node, *mgo.Session)
+    defer wg.Done()
 
     //var crumbs []string
-    //collect := glob_session.DB("parser").C("pudra_navi")
+    coll := glob_session.DB("parser").C(MakeTimePrefix(`pudra_navi`))
 
-    f = func(node *html.Node, session *mgo.Session, redis_cli *redis.Client) {
+    f = func(node *html.Node, session *mgo.Session) {
         if node.Type == html.ElementNode && node.Data == "a" {
             match := false
             contents := ""
@@ -138,11 +96,22 @@ func ExtractBrand(glob_session *mgo.Session, url string, redis_cli *redis.Client
             }
             if match {
                 fmt.Println("FOUND b-menu-item-link", contents, len(contents), href)
+                dd, err := coll.Find(bson.M{"brand": contents, "status": 0}).Count()
+                if err != nil {
+                    syslog.Critf("pudra find price double: %s", err)
+                }
+                if dd < 1 {
+                    // status = 0 -> pending
+                    err := coll.Insert(bson.M{"brand": contents, "url": href, "status": 0})
+                    if err != nil {
+                        syslog.Critf("pudra error insert: %s", err)
+                    }
+                }
             }
         }
 
         for c := node.FirstChild; c != nil; c = c.NextSibling {
-            f(c, session, redis_cli)
+            f(c, session)
         }
     }
 
@@ -162,46 +131,47 @@ func ExtractBrand(glob_session *mgo.Session, url string, redis_cli *redis.Client
         syslog.Critf("auchan html.Parse error: %s", errs)
     }
 
-    f(doc, glob_session, redis_cli)
+    f(doc, glob_session)
+}
+
+func PullFromQueue(glob_session *mgo.Session, ch chan int) {
+    coll := glob_session.DB("parser").C(MakeTimePrefix(`pudra_navi`))
+    type Product struct {
+        Articul, Name, Price, Country, Img, Brand, Navi, Url, Date string
+    }
+    for {
+        duration := 500 * time.Millisecond
+        time.Sleep(duration)
+        num, err := coll.Find(bson.M{"status": 0}).Count()
+        if err != nil {
+            syslog.Critf("pudra find price double: %s", err)
+        }
+        if num > 0 {
+            fmt.Println("PULL")
+            err := coll.Find(bson.M{"brand": contents, "status": 0}).One()
+        }
+        fmt.Println("sync")
+    }
 }
 
 func main() {
 
-    // Redis
-    client := redis.NewClient(&redis.Options{
-        Addr:     "localhost:6379",
-        Password: "", // no password set
-        DB:       0,  // use default DB
-    })
-    pong, err := client.Ping().Result()
-    fmt.Println(pong, err)
+    var wg sync.WaitGroup
+
+    channel := make(chan int)
 
     // Mongo
     session, glob_err := mgo.Dial("mongodb://apidev:apidev@localhost:27017/parser")
     defer session.Close()
 
-    pubsub := client.Subscribe("productPageLinkChannel")
-    defer pubsub.Close()
-
-    subscr, err := pubsub.ReceiveTimeout(time.Second)
-    if err != nil {
-        fmt.Println(err)
-    }
-    fmt.Println(subscr)
-
     if glob_err != nil {
         syslog.Critf("Error: %s", glob_err)
     }
 
-    ExtractBrand(session, `https://pudra.ru/brands.html`, client)
-
-    /*
-    for {
-        msg, err := pubsub.ReceiveMessage()
-        if err != nil {
-            fmt.Println("ERROR: ", err)
-        }
-        fmt.Println(msg.Channel, " MSG RCV: ", msg.Payload)
-    }
-    */
+    wg.Add(1)
+    go ExtractBrand(session, `https://pudra.ru/brands.html`, &wg, channel)
+    wg.Add(1)
+    go PullFromQueue(session, channel)
+    wg.Wait()
+    fmt.Println("Done")
 }
