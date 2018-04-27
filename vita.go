@@ -70,11 +70,12 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
     var f4 func(*html.Node, *mgo.Session)
 
     //var crumbs []string
-    coll := glob_session.DB("parser").C(`VITA_products_final`)
+    coll := glob_session.DB("parser").C(`VITA_products`)
 
     var Name string
     var Navi string
-    var Price string
+    var ListingPrice string
+    var OldPrice string
     var Url string
 
     var crumbs []string
@@ -94,7 +95,7 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
                     }
                     if dd < 1 {
                         // status = 0 -> pending
-                        err := coll.Insert(bson.M{"navi": Navi, "name": Name, "price": Price, "url": Url})
+                        err := coll.Insert(bson.M{"navi": Navi, "name": Name, "oldprice": OldPrice, "listingprice": ListingPrice, "url": Url})
                         if err != nil {
                             syslog.Critf("pudra error insert: %s", err)
                         }
@@ -102,7 +103,8 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
 
                     Name = ""
                     Navi = ""
-                    Price = ""
+                    OldPrice = ""
+                    ListingPrice = ""
 
                     crumbs = []string{}
                 }
@@ -183,8 +185,25 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
                     contents = strings.Replace(contents, `<span class="icon-rub"></span>`, "", -1)
                     contents = strings.TrimLeft(contents, " ")
                     contents = strings.TrimRight(contents, " ")
-                    Price = contents
-                    fmt.Println("PRICE", contents)
+                    ListingPrice = unShufflePrice(contents)
+                    fmt.Println("LISTING PRICE", ListingPrice)
+                }
+            }
+        }
+
+        if node.Type == html.ElementNode && node.Data == "div" {
+            for _, a := range node.Attr {
+                if a.Val == "product-price__old" {
+                    contents := renderNode(node)
+                    contents = extractContext(contents)
+                    contents = strings.Replace(contents, "\n", "", -1)
+                    contents = strings.Replace(contents, "\r", "", -1)
+                    contents = strings.Replace(contents, "\t", "", -1)
+                    contents = strings.Replace(contents, `<span class="icon-rub"></span>`, "", -1)
+                    contents = strings.TrimLeft(contents, " ")
+                    contents = strings.TrimRight(contents, " ")
+                    OldPrice = unShufflePrice(contents)
+                    fmt.Println("PRICE OLD", OldPrice)
                 }
             }
         }
@@ -250,6 +269,38 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
     f1(doc, glob_session)
 }
 
+func unShufflePrice(price string) string {
+
+    var ns []rune
+
+    for _, r := range price {
+        switch r {
+            case '1':
+                ns = append(ns, '2')
+            case '2':
+                ns = append(ns, '4')
+            case '3':
+                ns = append(ns, '7')
+            case '4':
+                ns = append(ns, '3')
+            case '5':
+                ns = append(ns, '6')
+            case '6':
+                ns = append(ns, '5')
+            case '7':
+                ns = append(ns, '1')
+            case '8':
+                ns = append(ns, '9')
+            case '9':
+                ns = append(ns, '8')
+            case '0':
+                ns = append(ns, '0')
+        }
+    }
+
+    return string(ns)
+}
+
 func main() {
 
     var wg sync.WaitGroup
@@ -265,7 +316,7 @@ func main() {
     }
 
     //wg.Add(1)
-    i := 0
+    i := 14
     for i < 50 {
         Extract(session, "https://vitaexpress.ru/ajax/filter.php?sort=SORT&direction=DESC&filters=2446%3Don%262458%3Don%262488%3Don%262507%3Don%262526%3Don%262551%3Don%262567%3Don%262579%3Don%262586%3Don&PAGEN_1="+strconv.Itoa(i), &wg, channel)
         i++
