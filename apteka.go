@@ -5,15 +5,15 @@ import (
     "io"
     "fmt"
     "time"
-    "sync"
+    //"sync"
     "bytes"
-    "strconv"
+    //"strconv"
     "strings"
     "net/http"
     //"encoding/json"
     //"io/ioutil"
     "gopkg.in/mgo.v2"
-    "gopkg.in/mgo.v2/bson"
+    //"gopkg.in/mgo.v2/bson"
     "golang.org/x/net/html"
     //"github.com/go-redis/redis"
     //"github.com/json-iterator/go"
@@ -62,93 +62,57 @@ func extractContext(s string) string {
     }
 }
 
-func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan int) {
+type MySession struct {
+    *mgo.Session
+}
 
-    var f1 func(*html.Node, *mgo.Session)
-    var f2 func(*html.Node, *mgo.Session)
-    var f3 func(*html.Node, *mgo.Session)
-    var f4 func(*html.Node, *mgo.Session)
-
-    //var crumbs []string
-    coll := glob_session.DB("parser").C(`VITA_products`)
-
-    var Name string
-    var Navi string
-    var ListingPrice string
-    var OldPrice string
-    var Url string
-
-    var crumbs []string
-
-    f1 = func(node *html.Node, session *mgo.Session) {
-        if node.Type == html.ElementNode && node.Data == "div" {
-            for _, a := range node.Attr {
-                if a.Val == "product__mobRight" {
-                    fmt.Println("FOUND")
-                    f2(node, session)
-
-                    Navi = strings.Join(crumbs, ";")
-
-                    dd, err := coll.Find(bson.M{"name": Name}).Count()
-                    if err != nil {
-                        syslog.Critf("pudra find price double: %s", err)
-                    }
-                    if dd < 1 {
-                        // status = 0 -> pending
-                        err := coll.Insert(bson.M{"navi": Navi, "name": Name, "oldprice": OldPrice, "listingprice": ListingPrice, "url": Url})
-                        if err != nil {
-                            syslog.Critf("pudra error insert: %s", err)
-                        }
-                    }
-
-                    Name = ""
-                    Navi = ""
-                    OldPrice = ""
-                    ListingPrice = ""
-
-                    crumbs = []string{}
+func (session *MySession) ExtractProd(prod_ch chan string) {
+    for {
+        //time.Sleep(500 * time.Millisecond)
+        select {
+            case msg := <-prod_ch:
+                fmt.Println("ExtractProd received:", "https://apteka.ru" + msg)
+                /*
+                request := gorequest.New()
+                resp, body, errs := request.Get("https://apteka.ru" + msg).
+                    Retry(3, 5 * time.Second, http.StatusBadRequest, http.StatusInternalServerError).
+                    End()
+                _ = resp
+                if errs != nil {
+                    syslog.Critf("auchan request.Get(BrandUrl) error: %s", errs)
                 }
-            }
-        }
-
-        for c := node.FirstChild; c != nil; c = c.NextSibling {
-            f1(c, session)
+                doc, err := html.Parse(strings.NewReader(string(body)))
+                if err != nil {
+                    syslog.Critf("auchan html.Parse error: %s", errs)
+                }
+                */
+                //f2(doc, session)
+            default:
+                //fmt.Println("ExtractPage no msg rcvd")
         }
     }
+}
 
-    f2 = func(node *html.Node, session *mgo.Session) {
+// Page extract goroutine
+func (session *MySession) ExtractPage(ch chan string, prod_ch chan string) {
+
+    var f2 func(*html.Node, *MySession)
+
+    f2 = func(node *html.Node, session *MySession) {
         if node.Type == html.ElementNode && node.Data == "a" {
+            match := false
+            href := ""
             for _, a := range node.Attr {
                 if a.Key == "href" {
-                    contents := renderNode(node)
-                    contents = extractContext(contents)
-                    contents = strings.Replace(contents, "\n", "", -1)
-                    contents = strings.Replace(contents, "\r", "", -1)
-                    contents = strings.Replace(contents, "\t", "", -1)
-                    contents = strings.TrimLeft(contents, " ")
-                    contents = strings.TrimRight(contents, " ")
-                    if !strings.Contains(contents, "В корзину") {
-                        //fmt.Println("NAME", contents)
-                        fmt.Println("PRODUCT URL", a.Val)
-                        Url = a.Val
-                        request := gorequest.New()
-                        resp, body, errs := request.Get("https://vitaexpress.ru"+a.Val).
-                            Retry(3, 5 * time.Second, http.StatusBadRequest, http.StatusInternalServerError).
-                            End()
-                        _ = resp
-                        if errs != nil {
-                            syslog.Critf("vita request.Get(BrandUrl) error: %s", errs)
-                        }
-
-                        doc, err := html.Parse(strings.NewReader(string(body)))
-
-                        if err != nil {
-                            syslog.Critf("vita html.Parse error: %s", errs)
-                        }
-
-                        f3(doc, session)
-                    }
+                    href = a.Val
                 }
+                if a.Key == "itemprop" && a.Val == "name" {
+                    match = true
+                }
+            }
+            if match {
+                prod_ch <- href
+                match = false
             }
         }
 
@@ -157,7 +121,72 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
         }
     }
 
-    f3 = func(node *html.Node, session *mgo.Session) {
+    for {
+        //time.Sleep(500 * time.Millisecond)
+        select {
+            case msg := <-ch:
+                fmt.Println("ExtractPage received:", "https://apteka.ru" + msg)
+                request := gorequest.New()
+                resp, body, errs := request.Get("https://apteka.ru" + msg).
+                    Retry(3, 5 * time.Second, http.StatusBadRequest, http.StatusInternalServerError).
+                    End()
+                _ = resp
+                if errs != nil {
+                    syslog.Critf("auchan request.Get(BrandUrl) error: %s", errs)
+                }
+                doc, err := html.Parse(strings.NewReader(string(body)))
+                if err != nil {
+                    syslog.Critf("auchan html.Parse error: %s", errs)
+                }
+                f2(doc, session)
+            default:
+                //fmt.Println("ExtractPage no msg rcvd")
+        }
+    }
+}
+
+func (session *MySession) Extract(url string, ch chan string, prod_ch chan string) {
+
+    var f2 func(*html.Node, *MySession)
+    var f3 func(*html.Node, *MySession)
+    var f4 func(*html.Node, *MySession)
+
+    //var crumbs []string
+    //coll := session.DB("parser").C(`VITA_products`)
+
+    var Name string
+    //var Navi string
+    var ListingPrice string
+    var OldPrice string
+    //var Url string
+
+    var crumbs []string
+
+    f2 = func(node *html.Node, session *MySession) {
+        if node.Type == html.ElementNode && node.Data == "a" {
+            match := false
+            href := ""
+            for _, a := range node.Attr {
+                if a.Key == "href" {
+                    href = a.Val
+                }
+                if a.Key == "data-page" {
+                    match = true
+                }
+            }
+            if match {
+                fmt.Println("found", href)
+                ch <- href
+                match = false
+            }
+        }
+
+        for c := node.FirstChild; c != nil; c = c.NextSibling {
+            f2(c, session)
+        }
+    }
+
+    f3 = func(node *html.Node, session *MySession) {
         if node.Type == html.ElementNode && node.Data == "h1" {
             for _, a := range node.Attr {
                 if a.Val == "product-title" {
@@ -185,7 +214,6 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
                     contents = strings.Replace(contents, `<span class="icon-rub"></span>`, "", -1)
                     contents = strings.TrimLeft(contents, " ")
                     contents = strings.TrimRight(contents, " ")
-                    ListingPrice = unShufflePrice(contents)
                     fmt.Println("LISTING PRICE", ListingPrice)
                 }
             }
@@ -202,7 +230,6 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
                     contents = strings.Replace(contents, `<span class="icon-rub"></span>`, "", -1)
                     contents = strings.TrimLeft(contents, " ")
                     contents = strings.TrimRight(contents, " ")
-                    OldPrice = unShufflePrice(contents)
                     fmt.Println("PRICE OLD", OldPrice)
                 }
             }
@@ -222,7 +249,7 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
         }
     }
 
-    f4 = func(node *html.Node, session *mgo.Session) {
+    f4 = func(node *html.Node, session *MySession) {
         if node.Type == html.ElementNode && node.Data == "a" {
             match := false
             href := ""
@@ -266,61 +293,40 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
         syslog.Critf("auchan html.Parse error: %s", errs)
     }
 
-    f1(doc, glob_session)
-}
-
-func unShufflePrice(price string) string {
-
-    var ns []rune
-
-    for _, r := range price {
-        switch r {
-            case '1':
-                ns = append(ns, '2')
-            case '2':
-                ns = append(ns, '4')
-            case '3':
-                ns = append(ns, '7')
-            case '4':
-                ns = append(ns, '3')
-            case '5':
-                ns = append(ns, '6')
-            case '6':
-                ns = append(ns, '5')
-            case '7':
-                ns = append(ns, '1')
-            case '8':
-                ns = append(ns, '9')
-            case '9':
-                ns = append(ns, '8')
-            case '0':
-                ns = append(ns, '0')
-        }
-    }
-
-    return string(ns)
+    f2(doc, session)
 }
 
 func main() {
 
-    var wg sync.WaitGroup
+    //var wg sync.WaitGroup
+    var pages [5]string
 
-    channel := make(chan int)
+    pages[0] = "https://apteka.ru/category/derma_cosmetics/body/"
+    pages[1] = "https://apteka.ru/category/derma_cosmetics/head/"
+    pages[2] = "https://apteka.ru/category/derma_cosmetics/baby/"
+    pages[3] = "https://apteka.ru/category/derma_cosmetics/face/"
+    pages[4] = "https://apteka.ru/category/derma_cosmetics/sunscreen/"
+
+    channel := make(chan string)
+    prod_channel := make(chan string)
 
     // Mongo
-    session, glob_err := mgo.Dial("mongodb://apidev:apidev@localhost:27017/parser")
-    defer session.Close()
+    msession, glob_err := mgo.Dial("mongodb://apidev:apidev@localhost:27017/parser")
+    defer msession.Close()
+
+    session := &MySession{msession}
 
     if glob_err != nil {
         syslog.Critf("Error: %s", glob_err)
     }
 
-    //wg.Add(1)
+    go session.ExtractPage(channel, prod_channel)
+    go session.ExtractProd(prod_channel)
+
     i := 1
-    for i < 50 {
-        Extract(session, "https://vitaexpress.ru/ajax/filter.php?sort=SORT&direction=DESC&filters=2446%3Don%262458%3Don%262488%3Don%262507%3Don%262526%3Don%262551%3Don%262567%3Don%262579%3Don%262586%3Don&PAGEN_1="+strconv.Itoa(i), &wg, channel)
+    for _, v := range pages {
+        session.Extract(v, channel, prod_channel)
         i++
     }
-    //wg.Wait()
     fmt.Println("Done")
 }
