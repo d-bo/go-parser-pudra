@@ -70,7 +70,7 @@ func Extract(glob_session *mgo.Session, url string, wg *sync.WaitGroup, ch chan 
     var f4 func(*html.Node, *mgo.Session)
 
     //var crumbs []string
-    coll := glob_session.DB("parser").C(`VITA_products`)
+    coll := glob_session.DB("parser").C(`VITA_products_fresh`)
 
     var Name string
     var Navi string
